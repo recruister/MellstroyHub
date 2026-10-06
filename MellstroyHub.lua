@@ -1810,6 +1810,11 @@ local function GetPromptType(prompt)
     local name = string.lower(prompt.Name or "")
     local parentNames = CollectParentNames(prompt)
 
+    -- ✅ МАГАЗИН — ПЕРВАЯ ПРОВЕРКА (до loot/open/hide)
+    if ParentContains(parentNames, "shop") then
+        return "shop"
+    end
+
     -- HidingLocker — игнор
     if ParentContains(parentNames, "hidinglocker")
        or ParentContains(parentNames, "hidelocker")
@@ -1885,6 +1890,7 @@ local function GetPromptType(prompt)
 end
 
 local function GetPriority(promptType)
+    if promptType == "shop" then return 999 end   -- игнорируем
     if promptType == "loot" then return 1 end
     if promptType == "open" then return 2 end
     if promptType == "hide" then return 999 end
@@ -5085,6 +5091,9 @@ local function IsKeycard(inst)
     if not inst or typeof(inst) ~= "Instance" then return false end
     if not (inst:IsA("Model") or inst:IsA("BasePart") or inst:IsA("Tool")) then return false end
     if not string.find(string.lower(inst.Name), "keycard", 1, true) then return false end
+	
+	    -- Исключаем StellaKeycard (это предмет/декор, а не обычная кейкарта)
+    if string.find(string.lower(inst.Name), "stella", 1, true) then return false end
 
     -- Пропускаем карту в руках / на персонаже игрока
     local char = LocalPlayer.Character
@@ -5772,6 +5781,8 @@ local ItemWhitelist = {
     "RiftCandle",
     "Compass",
     -- добавляй новые сюда
+	"StellaKeycard",
+    "BulkLight",
 }
 
 -- Быстрая проверка по таблице (O(1))
