@@ -9,54 +9,61 @@ do
     local INSTANCE_ID = "__MellstroyHub_Instance"
 
     if getgenv()[FLAG] == true then
-        print("[MellstroyHub] Уже заинжекчен. Повторная инжекция отменена.")
+        print("[MellstroyHub] Уже заинжекчен. Автоматическая выгрузка старой версии...")
 
+        -- Пытаемся выгрузить старую версию
         pcall(function()
-            if getgenv().__MellstroyHub_Library and getgenv().__MellstroyHub_Library.Notify then
-                getgenv().__MellstroyHub_Library:Notify({
-                    Title = "MellstroyHub",
-                    Description = "Уже запущен!",
-                    Time = 3
-                })
+            if getgenv().__MellstroyHub_Unload then
+                getgenv().__MellstroyHub_Unload()
             end
         end)
 
-        return
+        -- Форсированно чистим Library
+        pcall(function()
+            if getgenv().__MellstroyHub_Library and getgenv().__MellstroyHub_Library.Unload then
+                getgenv().__MellstroyHub_Library:Unload()
+            end
+        end)
+
+        -- Уничтожаем UI
+        pcall(function()
+            local cg = game:GetService("CoreGui")
+            for _, name in ipairs({ "MyHub_ESP", "MyHub_KeyBindList", "MyHub_ShiverTimer" }) do
+                local old = cg:FindFirstChild(name)
+                if old then old:Destroy() end
+            end
+        end)
+
+        -- Сбрасываем флаг
+        getgenv()[FLAG] = false
+        getgenv().__MellstroyHub_Library = nil
+        getgenv().__MellstroyHub_Unload = nil
+
+        print("[MellstroyHub] Старая версия выгружена. Загружаю новую...")
     end
 
-    -- НЕ ставим флаг здесь! Ставим только после успешной загрузки Library.
     getgenv()[INSTANCE_ID] = tick()
 end
 
 local function safeHttpGet(url)
-    -- Пробуем разные способы
-    local methods = {
-        function() return game:HttpGet(url, true) end,
-        function() return game:HttpGet(url) end,
-    }
+    -- Используем ТОЛЬКО game:HttpGet БЕЗ второго аргумента
+    -- (некоторые executor'ы зависают на game:HttpGet(url, true))
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if ok and type(res) == "string" and #res > 100 then
+        return res
+    end
+
+    -- Fallback: request (если game:HttpGet не сработал)
     if request then
-        table.insert(methods, function()
+        local ok2, res2 = pcall(function()
             local r = request({ Url = url, Method = "GET" })
             return r and r.Body
         end)
-    end
-    if syn and syn.request then
-        table.insert(methods, function()
-            local r = syn.request({ Url = url, Method = "GET" })
-            return r and r.Body
-        end)
-    end
-    if http_request then
-        table.insert(methods, function() return http_request({ Url = url, Method = "GET" }).Body end)
-    end
-
-    for i, fn in ipairs(methods) do
-        local ok, res = pcall(fn)
-        if ok and type(res) == "string" and #res > 100 then
-            print("[Loader] Успешно скачано через метод #" .. i .. " (" .. #res .. " байт)")
-            return res
+        if ok2 and type(res2) == "string" and #res2 > 100 then
+            return res2
         end
     end
+
     return nil
 end
 
@@ -69,7 +76,6 @@ local repos = {
 local Library, SaveManager, ThemeManager
 
 for _, repo in ipairs(repos) do
-    print("[Loader] Пробую: " .. repo)
     local src = safeHttpGet(repo .. "Library.lua")
     if src then
         local fn = loadstring or load
@@ -2338,7 +2344,7 @@ if NoclipToggleEx then
         if NoclipConn then NoclipConn:Disconnect() NoclipConn = nil end
 
         if not Value then
-            -- Возвращаем ОРИГИНАЛЬНЫЕ CanCollide каждой части
+            -- Возвращаем оригинальные CanCollide
             local char = LP.Character
             if char then
                 for _, part in ipairs(char:GetDescendants()) do
@@ -2354,7 +2360,7 @@ if NoclipToggleEx then
             return
         end
 
-        -- Запоминаем оригинальные CanCollide ПЕРЕД тем как сделать false
+        -- Запоминаем оригинальные CanCollide ПЕРЕД изменением
         NoclipSavedCollide = {}
         local char = LP.Character
         if char then
@@ -2370,7 +2376,6 @@ if NoclipToggleEx then
             if not char then return end
             for _, part in ipairs(char:GetDescendants()) do
                 if part:IsA("BasePart") then
-                    -- Запоминаем, если часть новая (аксессуар наделся, tool взялся)
                     if NoclipSavedCollide[part] == nil then
                         NoclipSavedCollide[part] = part.CanCollide
                     end
@@ -2391,7 +2396,6 @@ RegisterCleanup("Noclip", function()
                 if orig ~= nil then
                     part.CanCollide = orig
                 else
-                    -- Если оригинала нет — ставим true (дефолт для тела)
                     part.CanCollide = true
                 end
             end
@@ -4359,6 +4363,19 @@ end)
 -- ============================================================
 -- DOOR ESP
 -- ============================================================
+-- Очищаем старый cache от прошлой сессии (если есть)
+if getgenv().DoorESPState then
+    local old = getgenv().DoorESPState
+    -- Удаляем старые anchors и highlights из Workspace
+    for _, data in pairs(old.Objects or {}) do
+        for _, hl in ipairs(data.Highlights or {}) do
+            pcall(function() hl:Destroy() end)
+        end
+        pcall(function() if data.Billboard then data.Billboard:Destroy() end end)
+        pcall(function() if data.Anchor then data.Anchor:Destroy() end end)
+    end
+end
+
 local DoorESPState = { Objects = {}, Cache = {}, Loop = nil, AddedConn = nil, RoomConn = nil, RoomAddedConn = nil }
 getgenv().DoorESPState = DoorESPState
 
@@ -4366,11 +4383,17 @@ local DOOR_MAX_DIST = 400
 local CACHE_INTERVAL = 1
 
 local function GetRoomNumberFromDoors(doorsFolder)
+    -- Ищем комнату через ЛЮБОГО родителя, но с приоритетом:
+    -- 1. Если находим число напрямую — используем его
+    -- 2. Иначе идём вверх до CurrentRooms
+
     local p = doorsFolder.Parent
     local depth = 0
     while p and p ~= workspace and depth < 12 do
         local n = tonumber(p.Name)
-        if n then return n + 1 end
+        if n then
+            return n + 1   -- +1 потому что комната N в игре = N+1 в Doors
+        end
         p = p.Parent
         depth = depth + 1
     end
@@ -4388,7 +4411,9 @@ local function IsDoorPart(inst)
             local n = p.Name
             if n == "Furniture" or n == "HidingLocker" or n == "HidingLockers"
                or n == "Locker" or n == "Lockers" or n == "Cabinet"
-               or n == "LootLocker" or n == "Warehouse_LootLocker" then
+               or n == "LootLocker" or n == "Warehouse_LootLocker"
+               or n == "LockerDoors" or n == "Warehouse_HidingLocker"
+               or n == "LockerDoorsLeft" or n == "LockerDoorsRight" then
                 return false
             end
             p = p.Parent
@@ -4397,7 +4422,7 @@ local function IsDoorPart(inst)
         return true
     end
 
-    -- Вспомогалка: проверка на подкомнату (не подсвечиваем)
+    -- Вспомогалка: проверка на подкомнату
     local function IsSubroom(obj)
         local p = obj
         local depth = 0
@@ -4412,125 +4437,59 @@ local function IsDoorPart(inst)
         return false
     end
 
-    -- GateFrame (Model) — где угодно в дереве комнаты
-    if inst.Name == "GateFrame" and inst:IsA("Model") then
-        if not NotFurniture(inst) then return false end
-        if IsSubroom(inst) then return false end
-        -- Отсеиваем декор: если внутри только стены (Wall) — это не дверь
-        if inst:FindFirstChild("Wall", true) then return false end
-        return true
-    end
-
-    -- Gate (Model) — только если родитель Door / DoorWarehouseGate / Assets
-    if inst.Name == "Gate" and inst:IsA("Model") then
-        local pp = inst.Parent
-        if pp and (pp.Name == "Door" or pp.Name == "DoorWarehouseGate" or pp.Name == "Assets") then
-            if not NotFurniture(inst) then return false end
-            if IsSubroom(inst) then return false end
-            if inst:FindFirstChild("Wall", true) then return false end
-            return true
+    -- Вспомогалка: содержит ли Main (настоящая дверь) на 2 уровня вглубь?
+    local function HasMain(obj)
+        -- Прямой Main
+        if obj:FindFirstChild("Main") then return true end
+        -- Main внутри детей (например, Gate)
+        for _, child in ipairs(obj:GetChildren()) do
+            if child:FindFirstChild("Main") then return true end
         end
         return false
     end
 
-    -- DoorWarehouseGate (Model)
+    -- === ТОЛЬКО эти имена считаются дверьми ===
+    if inst.Name == "Door" and inst:IsA("Model") then
+        if not NotFurniture(inst) then return false end
+        if IsSubroom(inst) then return false end
+
+        -- Формат A: Door → Gate → Main (Warehouse)
+        if HasMain(inst) then return true end
+
+        -- Формат B: Door → Doors → DoorLeft / DoorRight (стандартные)
+        local doorsSub = inst:FindFirstChild("Doors")
+        if doorsSub then
+            if doorsSub:FindFirstChild("DoorLeft") or doorsSub:FindFirstChild("DoorRight") then
+                return true
+            end
+        end
+
+        -- Ни A ни B — не дверь
+        return false
+    end
+
     if inst.Name == "DoorWarehouseGate" and inst:IsA("Model") then
         if not NotFurniture(inst) then return false end
         if IsSubroom(inst) then return false end
+        if not HasMain(inst) then return false end
         return true
     end
 
-    -- Door (Model-обёртка с Gate/PrimaryPart внутри)
-    if inst.Name == "Door" and inst:IsA("Model") then
-        if not (inst:FindFirstChild("Gate") or inst:FindFirstChild("PrimaryPart")) then
-            return false
-        end
-        if not NotFurniture(inst) then return false end
-        if IsSubroom(inst) then return false end
-        return true
-    end
-
-    -- GateDoor (Main-XXXX) — MeshPart
-    if inst.Name == "GateDoor" and inst:IsA("BasePart") then
-        local parent = inst.Parent
-        if not (parent and parent:IsA("Model") and parent.Name == "Door") then
-            return false
-        end
-        if not NotFurniture(parent) then return false end
-        if IsSubroom(parent) then return false end
-        local p = parent.Parent
-        local depth = 0
-        local foundScriptables, foundFake, foundAssets = false, false, false
-        while p and p ~= workspace and depth < 12 do
-            local n = p.Name
-            if n == "Furniture" or n == "HidingLocker" or n == "HidingLockers" then return false end
-            if n == "Scriptables" then foundScriptables = true end
-            if n == "DoorLaboratoryFake" then foundFake = true end
-            if n == "Assets" then foundAssets = true end
-            p = p.Parent
-            depth = depth + 1
-        end
-        return not foundScriptables and not foundFake and not foundAssets
-    end
-
-    -- Стандартные двери (DoorLeft / DoorRight)
-    if not inst:IsA("BasePart") then return false end
-    if inst.Name ~= "DoorLeft" and inst.Name ~= "DoorRight" then return false end
-    local parent = inst.Parent
-    if not parent or not parent:IsA("Model") then return false end
-    if parent.Name ~= "DoorLeft" and parent.Name ~= "DoorRight" then return false end
-    if not NotFurniture(parent) then return false end
-    if IsSubroom(parent) then return false end
-
-    local p = parent.Parent
-    local depth = 0
-    local foundDoors, foundScriptables, foundFake, foundAssets = false, false, false, false
-    while p and p ~= workspace and depth < 12 do
-        local n = p.Name
-        if n == "Furniture" or n == "HidingLocker" or n == "HidingLockers" then return false end
-        if n == "Doors" then foundDoors = true end
-        if n == "Scriptables" then foundScriptables = true end
-        if n == "DoorLaboratoryFake" then foundFake = true end
-        if n == "Assets" then foundAssets = true end
-        p = p.Parent
-        depth = depth + 1
-    end
-    return foundDoors and not foundScriptables and not foundFake and not foundAssets
+    -- Всё остальное (Gate, GateFrame, GateDoor, Model, Wall, Pillar) — НЕ дверь
+    return false
 end
 
 local function FindDoorsFolder(inst)
-    -- Модели-двери — возвращаем сам объект как "папку"
-    if inst.Name == "GateFrame" and inst:IsA("Model") then
-        return inst
-    end
     if inst.Name == "DoorWarehouseGate" and inst:IsA("Model") then
         return inst
     end
     if inst.Name == "Door" and inst:IsA("Model") then
-        -- ВАЖНО: если внутри есть папка Doors (тип 1) — возвращаем именно её
+        -- Если внутри папка Doors (старый формат) — возвращаем её
         local doorsSub = inst:FindFirstChild("Doors")
         if doorsSub and doorsSub:IsA("Folder") then
             return doorsSub
         end
-        -- Иначе (Gate/PrimaryPart) — тип 3
-        if inst:FindFirstChild("Gate") or inst:FindFirstChild("PrimaryPart") then
-            return inst
-        end
-    end
-    if inst.Name == "Gate" and inst:IsA("Model") then
-        return inst.Parent
-    end
-    -- GateDoor — родитель Door
-    if inst.Name == "GateDoor" and inst:IsA("BasePart") then
-        if inst.Parent and inst.Parent:IsA("Model") and inst.Parent.Name == "Door" then
-            return inst.Parent
-        end
-    end
-    -- Стандартные двери — папка Doors
-    local p = inst.Parent
-    while p and p ~= workspace do
-        if p:IsA("Folder") and p.Name == "Doors" then return p end
-        p = p.Parent
+        return inst
     end
     return nil
 end
@@ -4548,16 +4507,29 @@ local function ComputeDoorCenter(doorsFolder)
                 if ok and cf then return cf.Position end
             end
         end
-        if doorsFolder.Name == "Door" then
-            local gateDoor = doorsFolder:FindFirstChild("GateDoor")
-            if gateDoor and gateDoor:IsA("BasePart") then return gateDoor.Position end
-            local gate = doorsFolder:FindFirstChild("Gate")
-            if gate then
-                local ok, cf = pcall(function() return gate:GetBoundingBox() end)
-                if ok and cf then return cf.Position end
-            end
-            if doorsFolder.PrimaryPart then return doorsFolder.PrimaryPart.Position end
+    if doorsFolder.Name == "Door" then
+        local gateDoor = doorsFolder:FindFirstChild("GateDoor")
+        if gateDoor and gateDoor:IsA("BasePart") then return gateDoor.Position end
+        local gate = doorsFolder:FindFirstChild("Gate")
+        if gate then
+            local ok, cf = pcall(function() return gate:GetBoundingBox() end)
+            if ok and cf then return cf.Position end
         end
+        -- Формат B: Doors.DoorLeft / Doors.DoorRight
+        local doorsSub = doorsFolder:FindFirstChild("Doors")
+        if doorsSub then
+            local left = doorsSub:FindFirstChild("DoorLeft")
+            local right = doorsSub:FindFirstChild("DoorRight")
+            local leftPart = left and left:FindFirstChildWhichIsA("BasePart")
+            local rightPart = right and right:FindFirstChildWhichIsA("BasePart")
+            if leftPart and rightPart then
+                return (leftPart.Position + rightPart.Position) / 2
+            end
+            if leftPart then return leftPart.Position end
+            if rightPart then return rightPart.Position end
+        end
+        if doorsFolder.PrimaryPart then return doorsFolder.PrimaryPart.Position end
+    end
         -- Общий случай — bbox модели
         local ok, cf = pcall(function() return doorsFolder:GetBoundingBox() end)
         if ok and cf then return cf.Position end
@@ -4612,17 +4584,40 @@ local function AddDoorESP(doorsFolder, color, cachedInfo)
         if not target then return end
         if typeof(target) ~= "Instance" then return end
         if not (target:IsA("Model") or target:IsA("BasePart")) then return end
-        local hl = Instance.new("Highlight")
-        hl.Adornee = target
-        hl.FillColor = color
-        hl.FillTransparency = 0.85
-        hl.OutlineColor = color
-        hl.OutlineTransparency = 0
-        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        hl.Parent = ESPFolder
-        table.insert(highlights, hl)
-    end
 
+        -- Если это BasePart — просто светим
+        if target:IsA("BasePart") then
+            local hl = Instance.new("Highlight")
+            hl.Adornee = target
+            hl.FillColor = color
+            hl.FillTransparency = 0.85
+            hl.OutlineColor = color
+            hl.OutlineTransparency = 0
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Parent = ESPFolder
+            table.insert(highlights, hl)
+            return
+        end
+
+        -- Если это Model — ищем ВНУТРИ "Main" MeshPart (рекурсивно)
+        local mainPart = target:FindFirstChild("Main", true)
+        if mainPart and mainPart:IsA("BasePart") then
+            local hl = Instance.new("Highlight")
+            hl.Adornee = mainPart
+            hl.FillColor = color
+            hl.FillTransparency = 0.85
+            hl.OutlineColor = color
+            hl.OutlineTransparency = 0
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Parent = ESPFolder
+            table.insert(highlights, hl)
+            return
+        end
+
+        -- Если "Main" не найден — не светим (это декор)
+        return
+    end
+	
     -- ==== ТИП 1: стандартные двери (папка Doors) ====
     if doorsFolder:IsA("Folder") and doorsFolder.Name == "Doors" then
         for _, m in ipairs(doorsFolder:GetChildren()) do
@@ -4651,12 +4646,29 @@ local function AddDoorESP(doorsFolder, color, cachedInfo)
             or doorsFolder:FindFirstChild("Gate", true)
             or doorsFolder:FindFirstChild("PrimaryPart", true)
         addHL(target or doorsFolder)
-    -- ==== Модель Door с Gate/PrimaryPart ====
+    -- ==== Модель Door ====
     elseif doorsFolder.Name == "Door" and doorsFolder:IsA("Model") then
-        local target = doorsFolder:FindFirstChild("Gate")
-            or doorsFolder:FindFirstChild("PrimaryPart")
-            or doorsFolder:FindFirstChild("GateDoor")
-        addHL(target or doorsFolder)
+        -- Формат A: Door → Gate → Main (Warehouse)
+        local gate = doorsFolder:FindFirstChild("Gate")
+        if gate then
+            addHL(gate)   -- addHL сам найдёт Main внутри
+        else
+            -- Формат B: Door → Doors → DoorLeft / DoorRight
+            local doorsSub = doorsFolder:FindFirstChild("Doors")
+            if doorsSub then
+                for _, m in ipairs(doorsSub:GetChildren()) do
+                    if m:IsA("Model") and (m.Name == "DoorLeft" or m.Name == "DoorRight") then
+                        local mesh = m:FindFirstChildWhichIsA("BasePart")
+                        if mesh then addHL(mesh) end
+                    end
+                end
+            else
+                -- Fallback
+                local target = doorsFolder:FindFirstChild("PrimaryPart")
+                    or doorsFolder:FindFirstChild("GateDoor")
+                addHL(target or doorsFolder)
+            end
+        end
     -- ==== Fallback ====
     else
         if doorsFolder:IsA("Model") or doorsFolder:IsA("BasePart") then
@@ -4770,23 +4782,28 @@ local function ScanRoomIntoCache(room)
     for _, inst in ipairs(room:GetDescendants()) do
         if IsDoorPart(inst) then
             local folder = FindDoorsFolder(inst)
-            if folder and not DoorESPState.Cache[folder] then
+            if folder then
                 local center = ComputeDoorCenter(folder)
                 if center then
                     local rn = GetRoomNumberFromDoors(folder)
 
-                    -- ДЕДУП: только если есть дверь С ТАКИМ ЖЕ DisplayRoom рядом
-                    -- (это одна и та же дверь найдена через разные ноды: Gate + Door + GateFrame)
-                    local isDuplicate = false
-                    for _, info in pairs(DoorESPState.Cache) do
-                        if info.DisplayRoom == rn and info.Center
-                           and (info.Center - center).Magnitude < 15 then
-                            isDuplicate = true
+                    -- Ищем существующую запись рядом (радиус 8 studs)
+                    local existingKey = nil
+                    for key, info in pairs(DoorESPState.Cache) do
+                        if info.Center and (info.Center - center).Magnitude < 8 then
+                            existingKey = key
                             break
                         end
                     end
 
-                    if not isDuplicate then
+                    if existingKey then
+                        -- Дверь уже есть. Обновляем номер если новый МЕНЬШЕ (ближе к комнате)
+                        local oldInfo = DoorESPState.Cache[existingKey]
+                        if rn and (not oldInfo.DisplayRoom or rn < oldInfo.DisplayRoom) then
+                            oldInfo.DisplayRoom = rn
+                        end
+                    else
+                        -- Новая дверь
                         DoorESPState.Cache[folder] = { Center = center, DisplayRoom = rn }
                     end
                 end
@@ -4858,6 +4875,17 @@ end
 local function StartDoorLoop()
     if DoorESPState.Loop then return end
 
+    -- Очищаем кэш при старте (на случай старых записей от прошлой сессии)
+    for _, data in pairs(DoorESPState.Objects) do
+        for _, hl in ipairs(data.Highlights or {}) do
+            pcall(function() hl:Destroy() end)
+        end
+        pcall(function() data.Billboard:Destroy() end)
+        pcall(function() data.Anchor:Destroy() end)
+    end
+    table.clear(DoorESPState.Objects)
+    table.clear(DoorESPState.Cache)
+
     RebuildDoorCache()
     
     -- Форс-ребилды после инжекта — комнаты/двери впереди могут прогрузиться с задержкой
@@ -4890,35 +4918,49 @@ local function StartDoorLoop()
     if DoorESPState.AddedConn then DoorESPState.AddedConn:Disconnect() end
     local DoorAddedQueue = {}
     local DoorAddedScheduled = false
-    DoorESPState.AddedConn = workspace.DescendantAdded:Connect(function(inst)
-        if not DoorESPToggle or not DoorESPToggle.Value then return end
-        -- Мгновенный отсев по классу и имени (без IsA-цепочек)
-        local n = inst.Name
-        if n ~= "DoorLeft" and n ~= "DoorRight"
-           and n ~= "GateDoor" and n ~= "GateFrame"
-           and n ~= "Gate" and n ~= "DoorWarehouseGate"
-           and n ~= "Door" then return end
-        table.insert(DoorAddedQueue, inst)
-        if DoorAddedScheduled then return end
-        DoorAddedScheduled = true
-        task.delay(0.8, function()
-            DoorAddedScheduled = false
-            for i = #DoorAddedQueue, 1, -1 do
-                local obj = DoorAddedQueue[i]
-                if obj and obj.Parent and IsDoorPart(obj) then
-                    local folder = FindDoorsFolder(obj)
-                    if folder and not DoorESPState.Cache[folder] then
-                        local center = ComputeDoorCenter(folder)
-                        if center then
-                            local rn = GetRoomNumberFromDoors(folder)
+DoorESPState.AddedConn = workspace.DescendantAdded:Connect(function(inst)
+    if not DoorESPToggle or not DoorESPToggle.Value then return end
+    local n = inst.Name
+    if n ~= "DoorLeft" and n ~= "DoorRight"
+       and n ~= "GateDoor" and n ~= "GateFrame"
+       and n ~= "Gate" and n ~= "DoorWarehouseGate"
+       and n ~= "Door" then return end
+    table.insert(DoorAddedQueue, inst)
+    if DoorAddedScheduled then return end
+    DoorAddedScheduled = true
+    task.delay(0.8, function()
+        DoorAddedScheduled = false
+        for i = #DoorAddedQueue, 1, -1 do
+            local obj = DoorAddedQueue[i]
+            if obj and obj.Parent and IsDoorPart(obj) then
+                local folder = FindDoorsFolder(obj)
+                if folder then
+                    local center = ComputeDoorCenter(folder)
+                    if center then
+                        local rn = GetRoomNumberFromDoors(folder)
+                        -- Дедуп по позиции
+                        local existingKey = nil
+                        for key, info in pairs(DoorESPState.Cache) do
+                            if info.Center and (info.Center - center).Magnitude < 8 then
+                                existingKey = key
+                                break
+                            end
+                        end
+                        if existingKey then
+                            local oldInfo = DoorESPState.Cache[existingKey]
+                            if rn and (not oldInfo.DisplayRoom or rn < oldInfo.DisplayRoom) then
+                                oldInfo.DisplayRoom = rn
+                            end
+                        else
                             DoorESPState.Cache[folder] = { Center = center, DisplayRoom = rn }
                         end
                     end
                 end
             end
-            table.clear(DoorAddedQueue)
-        end)
+        end
+        table.clear(DoorAddedQueue)
     end)
+end)
 
     if DoorESPState.RoomConn then DoorESPState.RoomConn:Disconnect() end
     local LastRoom = -1
@@ -5539,6 +5581,376 @@ RegisterCleanup("LockerESP", function()
     table.clear(LockerESPState.Objects)
     table.clear(LockerESPState.Cache)
     if Toggles.LockerESPToggle then SafeSetValue(Toggles.LockerESPToggle, false) end
+end)
+
+-- ============================================================
+-- CURRENCY ESP (Amethyst Shards)
+-- ============================================================
+local CurrencyESPState = { Objects = {}, Cache = {}, Loop = nil, AddedConn = nil, RoomAddedConn = nil }
+
+CurrencyESPToggle = VisualsLeft:AddToggle("CurrencyESPToggle", {
+    Text = "Currency ESP", Default = false,
+    Tooltip = "Подсвечивает фиолетовые аметисты и другие деньги."
+})
+CurrencyESPToggle = CurrencyESPToggle or (Toggles and Toggles.CurrencyESPToggle)
+
+if CurrencyESPToggle then
+    CurrencyESPToggle:AddColorPicker("CurrencyESPColor", {
+        Text = "Currency Color", Default = Color3.fromRGB(180, 80, 255), Transparency = 0
+    })
+end
+
+-- Проверка: это валюта? (по префиксу имени)
+local function IsCurrency(inst)
+    if not inst then return false end
+    if not (inst:IsA("Model") or inst:IsA("BasePart")) then return false end
+
+    local name = inst.Name
+    -- Ловит и AmethystShard, и AmethystCrystal, и AmethystCluster, и т.д.
+    if string.find(name, "Amethyst", 1, true) then return true end
+
+    return false
+end
+
+local function ScanCurrencyRoom(room)
+    if not room then return end
+    for _, inst in ipairs(room:GetDescendants()) do
+        if IsCurrency(inst) then
+            CurrencyESPState.Cache[inst] = true
+        end
+    end
+end
+
+local function RebuildCurrencyCache()
+    local rooms = workspace:FindFirstChild("CurrentRooms")
+    if not rooms then return end
+    -- Чистим мёртвые
+    for inst in pairs(CurrencyESPState.Cache) do
+        if not inst.Parent then CurrencyESPState.Cache[inst] = nil end
+    end
+    for _, room in ipairs(rooms:GetChildren()) do
+        if tonumber(room.Name) then ScanCurrencyRoom(room) end
+    end
+end
+
+local function StartCurrencyLoop()
+    if CurrencyESPState.Loop then return end
+
+    RebuildCurrencyCache()
+
+    -- Следим за новыми комнатами
+    if CurrencyESPState.RoomAddedConn then CurrencyESPState.RoomAddedConn:Disconnect() end
+    local rooms = workspace:FindFirstChild("CurrentRooms")
+    if rooms then
+        CurrencyESPState.RoomAddedConn = rooms.ChildAdded:Connect(function(room)
+            task.wait(0.6)
+            if CurrencyESPToggle and CurrencyESPToggle.Value and tonumber(room.Name) then
+                ScanCurrencyRoom(room)
+            end
+        end)
+    end
+
+    -- Новые валюты (появились при спавне)
+    if CurrencyESPState.AddedConn then CurrencyESPState.AddedConn:Disconnect() end
+    CurrencyESPState.AddedConn = workspace.DescendantAdded:Connect(function(inst)
+        if not CurrencyESPToggle or not CurrencyESPToggle.Value then return end
+        if IsCurrency(inst) then
+            CurrencyESPState.Cache[inst] = true
+        end
+    end)
+
+    local Frame = 0
+    CurrencyESPState.Loop = RunService.Heartbeat:Connect(function()
+        if not CurrencyESPToggle or not CurrencyESPToggle.Value then return end
+        Frame = Frame + 1
+        if Frame % 5 ~= 0 then return end
+
+        local color = (Library and Library.Options and Library.Options.CurrencyESPColor and Library.Options.CurrencyESPColor.Value) or Color3.fromRGB(180, 80, 255)
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+        -- Чистим мёртвые
+        local dead = {}
+        for inst in pairs(CurrencyESPState.Cache) do
+            if not inst.Parent then table.insert(dead, inst) end
+        end
+        for _, inst in ipairs(dead) do
+            RemoveSimpleESP(CurrencyESPState, inst)
+            CurrencyESPState.Cache[inst] = nil
+        end
+
+        -- Рисуем
+        for inst in pairs(CurrencyESPState.Cache) do
+            if not CurrencyESPState.Objects[inst] then
+                local data = MakeSimpleESP(inst, color, "Amethyst", hrp)
+                if data then CurrencyESPState.Objects[inst] = data end
+            else
+                UpdateSimpleESP(CurrencyESPState.Objects[inst], inst, color, "Amethyst", hrp)
+            end
+        end
+    end)
+end
+
+local function StopCurrencyLoop()
+    if CurrencyESPState.Loop then
+        CurrencyESPState.Loop:Disconnect()
+        CurrencyESPState.Loop = nil
+    end
+    if CurrencyESPState.AddedConn then
+        CurrencyESPState.AddedConn:Disconnect()
+        CurrencyESPState.AddedConn = nil
+    end
+    if CurrencyESPState.RoomAddedConn then
+        CurrencyESPState.RoomAddedConn:Disconnect()
+        CurrencyESPState.RoomAddedConn = nil
+    end
+end
+
+if CurrencyESPToggle then
+    CurrencyESPToggle:OnChanged(function(Value)
+        if Value then
+            StartCurrencyLoop()
+        else
+            StopCurrencyLoop()
+            for inst in pairs(CurrencyESPState.Objects) do
+                RemoveSimpleESP(CurrencyESPState, inst)
+            end
+        end
+    end)
+end
+
+RegisterCleanup("CurrencyESP", function()
+    StopCurrencyLoop()
+    for inst in pairs(CurrencyESPState.Objects) do
+        RemoveSimpleESP(CurrencyESPState, inst)
+    end
+    table.clear(CurrencyESPState.Objects)
+    table.clear(CurrencyESPState.Cache)
+    if Toggles.CurrencyESPToggle then SafeSetValue(Toggles.CurrencyESPToggle, false) end
+end)
+
+
+-- ============================================================
+-- ITEM ESP
+-- ============================================================
+local ItemESPState = { Objects = {}, Cache = {}, Loop = nil, AddedConn = nil, RoomAddedConn = nil, DropAddedConn = nil }
+
+local ItemESPToggle = VisualsLeft:AddToggle("ItemESPToggle", {
+    Text = "Item ESP",
+    Default = false,
+    Tooltip = "Подсвечивает предметы."
+})
+ItemESPToggle = ItemESPToggle or (Toggles and Toggles.ItemESPToggle)
+
+if ItemESPToggle then
+    ItemESPToggle:AddColorPicker("ItemESPColor", {
+        Text = "Item Color", Default = Color3.fromRGB(0, 255, 100), Transparency = 0
+    })
+end
+
+-- Список предметов для отслеживания (можно пополнять)
+local ItemWhitelist = {
+    "Vitamins",
+    "Bandage",
+    "Flashlight",
+    "Battery",
+    "Lockpick",
+    "Key",
+    "Keycard",
+    "Lighter",
+    "Candle",
+    "Crucifix",
+    "SkeletonKey",
+    "Multitool",
+    "Shears",
+    "StarVial",
+    "StarBottle",
+    "ShieldMini",
+    "ShieldBig",
+    "BandagePack",
+    "BatteryPack",
+    "HolyGrenade",
+    "RiftCandle",
+    "Compass",
+    -- добавляй новые сюда
+}
+
+-- Быстрая проверка по таблице (O(1))
+local ItemWhitelistMap = {}
+for _, name in ipairs(ItemWhitelist) do
+    ItemWhitelistMap[name] = name
+end
+
+-- Проверка: это интересный предмет?
+local function IsTrackedItem(inst)
+    if not inst then return false end
+    if not inst:IsA("Model") then return false end
+
+    -- Только по имени из whitelist
+    if not ItemWhitelistMap[inst.Name] then return false end
+
+    -- Исключаем предметы в руках / в инвентаре игрока
+    local char = LocalPlayer.Character
+    if char then
+        local p = inst
+        local depth = 0
+        while p and depth < 8 do
+            if p == char then return false end
+            p = p.Parent
+            depth = depth + 1
+        end
+    end
+
+    -- Должен иметь Handle (это подбираемый предмет, а не декор)
+    if not inst:FindFirstChild("Handle") and not inst:FindFirstChildWhichIsA("BasePart") then
+        return false
+    end
+
+    return true
+end
+
+local function ScanItemContainer(container)
+    if not container then return end
+    for _, inst in ipairs(container:GetDescendants()) do
+        if IsTrackedItem(inst) then
+            ItemESPState.Cache[inst] = true
+        end
+    end
+end
+
+local function RebuildItemCache()
+    -- 1. Drops (подобранные)
+    local drops = workspace:FindFirstChild("Drops")
+    if drops then
+        for _, inst in ipairs(drops:GetChildren()) do
+            if IsTrackedItem(inst) then
+                ItemESPState.Cache[inst] = true
+            end
+        end
+    end
+
+    -- 2. CurrentRooms (в ящиках, на полках)
+    local rooms = workspace:FindFirstChild("CurrentRooms")
+    if rooms then
+        for _, room in ipairs(rooms:GetChildren()) do
+            if tonumber(room.Name) then
+                ScanItemContainer(room)
+            end
+        end
+    end
+end
+
+local function StartItemLoop()
+    if ItemESPState.Loop then return end
+
+    RebuildItemCache()
+
+    -- Следим за новыми в Drops
+    local drops = workspace:FindFirstChild("Drops")
+    if drops then
+        if ItemESPState.DropAddedConn then ItemESPState.DropAddedConn:Disconnect() end
+        ItemESPState.DropAddedConn = drops.ChildAdded:Connect(function(inst)
+            if not ItemESPToggle or not ItemESPToggle.Value then return end
+            task.wait(0.3)
+            if IsTrackedItem(inst) then
+                ItemESPState.Cache[inst] = true
+            end
+        end)
+    end
+
+    -- Следим за новыми комнатами
+    if ItemESPState.RoomAddedConn then ItemESPState.RoomAddedConn:Disconnect() end
+    local rooms = workspace:FindFirstChild("CurrentRooms")
+    if rooms then
+        ItemESPState.RoomAddedConn = rooms.ChildAdded:Connect(function(room)
+            task.wait(0.6)
+            if ItemESPToggle and ItemESPToggle.Value and tonumber(room.Name) then
+                ScanItemContainer(room)
+            end
+        end)
+    end
+
+    -- Также слушаем DescendantAdded в Workspace (на случай новых ящиков)
+    if ItemESPState.AddedConn then ItemESPState.AddedConn:Disconnect() end
+    ItemESPState.AddedConn = workspace.DescendantAdded:Connect(function(inst)
+        if not ItemESPToggle or not ItemESPToggle.Value then return end
+        if inst:IsA("Model") and ItemWhitelistMap[inst.Name] then
+            if IsTrackedItem(inst) then
+                ItemESPState.Cache[inst] = true
+            end
+        end
+    end)
+
+    local Frame = 0
+    ItemESPState.Loop = RunService.Heartbeat:Connect(function()
+        if not ItemESPToggle or not ItemESPToggle.Value then return end
+        Frame = Frame + 1
+        if Frame % 5 ~= 0 then return end
+
+        local color = (Library and Library.Options and Library.Options.ItemESPColor and Library.Options.ItemESPColor.Value) or Color3.fromRGB(0, 255, 100)
+        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+        -- Чистим мёртвые
+        local dead = {}
+        for inst in pairs(ItemESPState.Cache) do
+            if not inst.Parent then table.insert(dead, inst) end
+        end
+        for _, inst in ipairs(dead) do
+            RemoveSimpleESP(ItemESPState, inst)
+            ItemESPState.Cache[inst] = nil
+        end
+
+        -- Рисуем
+        for inst in pairs(ItemESPState.Cache) do
+            if not ItemESPState.Objects[inst] then
+                local data = MakeSimpleESP(inst, color, inst.Name, hrp)
+                if data then ItemESPState.Objects[inst] = data end
+            else
+                UpdateSimpleESP(ItemESPState.Objects[inst], inst, color, inst.Name, hrp)
+            end
+        end
+    end)
+end
+
+local function StopItemLoop()
+    if ItemESPState.Loop then
+        ItemESPState.Loop:Disconnect()
+        ItemESPState.Loop = nil
+    end
+    if ItemESPState.AddedConn then
+        ItemESPState.AddedConn:Disconnect()
+        ItemESPState.AddedConn = nil
+    end
+    if ItemESPState.RoomAddedConn then
+        ItemESPState.RoomAddedConn:Disconnect()
+        ItemESPState.RoomAddedConn = nil
+    end
+    if ItemESPState.DropAddedConn then
+        ItemESPState.DropAddedConn:Disconnect()
+        ItemESPState.DropAddedConn = nil
+    end
+end
+
+if ItemESPToggle then
+    ItemESPToggle:OnChanged(function(Value)
+        if Value then
+            StartItemLoop()
+        else
+            StopItemLoop()
+            for inst in pairs(ItemESPState.Objects) do
+                RemoveSimpleESP(ItemESPState, inst)
+            end
+        end
+    end)
+end
+
+RegisterCleanup("ItemESP", function()
+    StopItemLoop()
+    for inst in pairs(ItemESPState.Objects) do
+        RemoveSimpleESP(ItemESPState, inst)
+    end
+    table.clear(ItemESPState.Objects)
+    table.clear(ItemESPState.Cache)
+    if Toggles.ItemESPToggle then SafeSetValue(Toggles.ItemESPToggle, false) end
 end)
 
 
