@@ -1625,17 +1625,145 @@ local FastInteractToggle = ExploitsGeneral:AddToggle("FastInteractToggle", {
     Tooltip = "Мгновенное взаимодействие."
 })
 
+-- ═══════════════════════════════════════════════════════
+-- FAST GAS CANISTER (быстрая заправка топливом)
+-- ═══════════════════════════════════════════════════════
+local FastGasToggle = ExploitsGeneral:AddToggle("FastGasToggle", {
+    Text = "Fast Gas Canister",
+    Default = false,
+    Tooltip = "Мгновенная заправка машины топливом."
+})
+
+local FastGasState = {
+    Enabled = false,
+    Loop = nil,
+    SavedHolds = {},
+	Prompts = {},
+}
+
+local function FastGas_ApplyOne(prompt)
+    if not prompt or not prompt:IsA("ProximityPrompt") then return end
+    
+    -- Сохраняем оригинал (если ещё не сохранён)
+    if FastGasState.SavedHolds[prompt] == nil then
+        FastGasState.SavedHolds[prompt] = prompt.HoldDuration or 1
+    end
+    
+    if prompt.HoldDuration ~= 0 then
+        prompt.HoldDuration = 0
+    end
+end
+
+local function FastGas_Enable()
+    if FastGasState.Enabled then return end
+    FastGasState.Enabled = true
+
+    -- Первый проход
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            local path = obj:GetFullName()
+            if string.find(path, "Gastank", 1, true)
+               or string.find(path, "Gastank", 1, true)
+               or string.find(path, "DrillTruck", 1, true)
+               or string.find(path, "Fuel", 1, true) then
+                FastGas_ApplyOne(obj)
+            end
+        end
+    end
+
+    -- Кэшируем промпты ОДИН раз (не перебираем каждый кадр!)
+    local gasPrompts = {}
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            local path = obj:GetFullName()
+            if string.find(path, "Gastank", 1, true)
+               or string.find(path, "DrillTruck", 1, true)
+               or string.find(path, "Fuel", 1, true) then
+                table.insert(gasPrompts, obj)
+                FastGas_ApplyOne(obj)
+            end
+        end
+    end
+    FastGasState.Prompts = gasPrompts
+
+    -- Лёгкий цикл — только по кэшу, раз в 0.5 сек
+    if FastGasState.Loop then FastGasState.Loop:Disconnect() end
+    FastGasState.Loop = task.spawn(function()
+        while FastGasState.Enabled do
+            task.wait(0.5)
+            if not FastGasState.Enabled then break end
+            for _, obj in ipairs(FastGasState.Prompts) do
+                if obj and obj.Parent then
+                    FastGas_ApplyOne(obj)
+                end
+            end
+        end
+    end)
+
+    print("[FastGas] === ON ===")
+end
+
+local function FastGas_Disable()
+    if not FastGasState.Enabled then return end
+    FastGasState.Enabled = false
+
+    if FastGasState.Loop then
+        task.cancel(FastGasState.Loop)
+        FastGasState.Loop = nil
+    end
+
+    -- Восстанавливаем оригиналы
+    for prompt, origHold in pairs(FastGasState.SavedHolds) do
+        if prompt and prompt.Parent then
+            pcall(function() 
+                -- Если origHold = 0 или nil — ставим 300 (дефолт для газового)
+                if not origHold or origHold == 0 then
+                    prompt.HoldDuration = 300
+                else
+                    prompt.HoldDuration = origHold
+                end
+            end)
+        end
+    end
+    FastGasState.SavedHolds = {}
+
+    print("[FastGas] === OFF ===")
+end
+
+if FastGasToggle then
+    FastGasToggle:OnChanged(function(Value)
+        if Value then FastGas_Enable() else FastGas_Disable() end
+    end)
+end
+
+RegisterCleanup("FastGas", function()
+    pcall(FastGas_Disable)
+    if Toggles and Toggles.FastGasToggle then
+        SafeSetValue(Toggles.FastGasToggle, false)
+    end
+end)
+
 local FastInteractState = {
     Enabled = false,
     SavedHolds = {},
     AddedConn = nil,
+	RescanConn = nil,
 }
 
 local function FastInteract_ApplyOne(prompt)
     if not prompt or not prompt:IsA("ProximityPrompt") then return end
+    
+    -- Сохраняем только если промпт ещё не сохранён И его HoldDuration > 0
+    -- (не сохраняем 0 — это может быть уже испорченное значение)
     if FastInteractState.SavedHolds[prompt] == nil then
-        FastInteractState.SavedHolds[prompt] = prompt.HoldDuration
+        if prompt.HoldDuration > 0 then
+            FastInteractState.SavedHolds[prompt] = prompt.HoldDuration
+        else
+            -- Если 0 — ставим дефолт 1, чтобы при выключении было что-то осмысленное
+            FastInteractState.SavedHolds[prompt] = 1
+        end
     end
+    
     if prompt.HoldDuration ~= 0 then
         prompt.HoldDuration = 0
     end
@@ -1667,12 +1795,31 @@ local function FastInteract_Enable()
         end
     end)
 
+    -- ═══════════════════════════════════════════════════════
+    -- ПЕРИОДИЧЕСКИЙ РЕСКАН (для промптов, у которых меняется Enabled)
+    -- ═══════════════════════════════════════════════════════
+    if FastInteractState.RescanConn then
+        task.cancel(FastInteractState.RescanConn)
+    end
+    FastInteractState.RescanConn = task.spawn(function()
+        while FastInteractState.Enabled do
+            task.wait(1)
+            if not FastInteractState.Enabled then break end
+            FastInteract_ApplyAll()
+        end
+    end)
+
     print("[FastInteract] === ON ===")
 end
 
 local function FastInteract_Disable()
     if not FastInteractState.Enabled then return end
     FastInteractState.Enabled = false
+	
+	    if FastInteractState.RescanConn then
+        task.cancel(FastInteractState.RescanConn)
+        FastInteractState.RescanConn = nil
+    end
 
     if FastInteractState.AddedConn then
         FastInteractState.AddedConn:Disconnect()
@@ -3705,6 +3852,12 @@ local function UpdateSimpleESP(data, inst, textColor, outlineColor, labelText, h
     end
 
     if not data then return end
+	-- Отображаемые имена (переопределение)
+    local DisplayNames = {
+        ["BreakableCrate"] = "Crate",
+		["StellaKeycard"] = "Stella Card",
+    }
+    local displayText = DisplayNames[labelText] or labelText
     local colorOpt = nil
     if labelText == "Keycard" then
         colorOpt = Library and Library.Options and Library.Options.KeycardESPColor
@@ -3743,7 +3896,7 @@ local function UpdateSimpleESP(data, inst, textColor, outlineColor, labelText, h
             local cam = workspace.CurrentCamera
             local camPos = cam and cam.CFrame.Position or hrp.Position
             local dist = math.floor((camPos - part.Position).Magnitude)
-            data.Label.Text = labelText .. " [" .. dist .. "]"
+            data.Label.Text = displayText .. " [" .. dist .. "]"
 
             local sizeMul = GetFOVSizeMultiplier()
             data.Billboard.Size = UDim2.new(0, 120 * sizeMul, 0, 30 * sizeMul)
@@ -3757,7 +3910,7 @@ local function UpdateSimpleESP(data, inst, textColor, outlineColor, labelText, h
             end
         end
     else
-        if data.Label then data.Label.Text = labelText end
+        if data.Label then data.Label.Text = displayText end
     end
 end
 
@@ -3776,49 +3929,92 @@ local function MakeEntityESP(inst, textColor, outlineColor, labelText, hrp)
     local part = inst:IsA("BasePart") and inst or (inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart"))
     if not part then return nil end
 
-    local bb = Instance.new("BillboardGui")
-    bb.Name = "MyHub_EntityCircle"
-    bb.Adornee = part
-    bb.Size = UDim2.new(8, 0, 8, 0)
-    bb.StudsOffset = Vector3.new(0, 0, 0)
-    bb.AlwaysOnTop = true
-    bb.MaxDistance = 800
-    bb.LightInfluence = 0
-    bb.Parent = ESPFolder
+    -- ═══════════════════════════════════════════════════════
+    -- Определяем тип: Highlight или Круг
+    -- ═══════════════════════════════════════════════════════
+    local useHighlight = false
+    local baseName = inst.Name:match("^([^_]+)")   -- EX15_1 → EX15
+    if baseName and string.find(baseName, "EX15", 1, true) then
+        useHighlight = true
+    end
 
-    -- Круглая обводка + лёгкий закрас
-    local circle = Instance.new("Frame")
-    circle.Name = "Circle"
-    circle.AnchorPoint = Vector2.new(0.5, 0.5)
-    circle.Position = UDim2.new(0.5, 0, 0.5, 0)
-    circle.Size = UDim2.new(0.8, 0, 0.8, 0)
-    circle.BackgroundColor3 = outlineColor
-    circle.BackgroundTransparency = 0.85     -- лёгкий закрас (0.85 = почти прозрачный)
-    circle.BorderSizePixel = 0
-    circle.Parent = bb
+    -- ═══════════════════════════════════════════════════════
+    -- HIGHLIGHT (только для EX15)
+    -- ═══════════════════════════════════════════════════════
+    local hl = nil
+    if useHighlight then
+        hl = Instance.new("Highlight")
+        hl.Name = "MyHub_EntityHighlight"
+        hl.Adornee = inst
+        hl.FillColor = outlineColor
+        hl.FillTransparency = 0.85
+        hl.OutlineColor = outlineColor
+        hl.OutlineTransparency = 0
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Parent = ESPFolder
+    end
 
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0.5, 0)   -- 0.5 = идеальный круг
-    corner.Parent = circle
+    -- ═══════════════════════════════════════════════════════
+    -- КРУГ + ТЕКСТ (для всех остальных)
+    -- ═══════════════════════════════════════════════════════
+    local bb = nil
+    local circle = nil
+    local stroke = nil
+    
+    if not useHighlight then
+        bb = Instance.new("BillboardGui")
+        bb.Name = "MyHub_EntityCircle"
+        bb.Adornee = part
+        bb.Size = UDim2.new(8, 0, 8, 0)
+        bb.StudsOffset = Vector3.new(0, 0, 0)
+        bb.AlwaysOnTop = true
+        bb.MaxDistance = 800
+        bb.LightInfluence = 0
+        bb.Parent = ESPFolder
 
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = outlineColor
-    stroke.Thickness = 3
-    stroke.Transparency = 0
-    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    stroke.Parent = circle
+        circle = Instance.new("Frame")
+        circle.Name = "Circle"
+        circle.AnchorPoint = Vector2.new(0.5, 0.5)
+        circle.Position = UDim2.new(0.5, 0, 0.5, 0)
+        circle.Size = UDim2.new(0.8, 0, 0.8, 0)
+        circle.BackgroundColor3 = outlineColor
+        circle.BackgroundTransparency = 0.85
+        circle.BorderSizePixel = 0
+        circle.Parent = bb
 
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0.5, 0)
+        corner.Parent = circle
+
+        stroke = Instance.new("UIStroke")
+        stroke.Color = outlineColor
+        stroke.Thickness = 3
+        stroke.Transparency = 0
+        stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        stroke.Parent = circle
+    end
+
+    -- ═══════════════════════════════════════════════════════
+    -- ТЕКСТ (для всех)
+    -- ═══════════════════════════════════════════════════════
+    -- Для сущностей — всегда Head или PrimaryPart (не прыгает)
+    local headPart = inst:FindFirstChild("Head") 
+        or inst:FindFirstChild("Head2")
+        or inst:FindFirstChild("HumanoidRootPart")
+        or inst.PrimaryPart 
+        or part
+    
     local bbText = Instance.new("BillboardGui")
     bbText.Name = "MyHub_EntityText"
-    bbText.Adornee = part
+    bbText.Adornee = headPart              -- ← фиксированная часть
     bbText.Size = UDim2.new(8, 0, 2, 0)
-    bbText.StudsOffset = Vector3.new(0, 0, 0)                      -- ← 0!
-    bbText.ExtentsOffsetWorldSpace = Vector3.new(0, 2.5, 0)        -- ← добавил?
+    bbText.StudsOffset = Vector3.new(0, 0, 0)
+    bbText.ExtentsOffsetWorldSpace = Vector3.new(0, 2.5, 0)
     bbText.AlwaysOnTop = true
     bbText.MaxDistance = 800
     bbText.LightInfluence = 0
     bbText.Parent = ESPFolder
-	
+
     local lbl = Instance.new("TextLabel")
     lbl.Name = "Label"
     lbl.Size = UDim2.new(1, 0, 1, 0)
@@ -3832,14 +4028,14 @@ local function MakeEntityESP(inst, textColor, outlineColor, labelText, hrp)
     lbl.Parent = bbText
 
     return {
-        Billboard = bb,
-        BillboardText = bbText,
+        Highlight = hl,          -- только для EX15
+        Billboard = bb,           -- только для остальных
         Circle = circle,
         Stroke = stroke,
+        BillboardText = bbText,
         Label = lbl,
         Part = part,
         Inst = inst,
-        OriginalY = part.Position.Y,   -- запоминаем начальную высоту
         IsEntity = true,
     }
 end
@@ -3847,46 +4043,57 @@ end
 local function UpdateEntityESP(data, inst, textColor, outlineColor, labelText, hrp)
     if not data then return end
 
-    if data.Stroke then data.Stroke.Color = outlineColor end
+    -- Highlight цвет (только если есть)
+    if data.Highlight then
+        data.Highlight.FillColor = outlineColor
+        data.Highlight.OutlineColor = outlineColor
+    end
+    
+    -- Круг цвет (только если есть)
     if data.Circle then data.Circle.BackgroundColor3 = outlineColor end
-    if data.Label then data.Label.TextColor3 = textColor end
+    if data.Stroke then data.Stroke.Color = outlineColor end
+    
+    -- Label цвет
+    if data.Label then
+        data.Label.TextColor3 = textColor
+    end
 
-if hrp and data.Billboard and data.Label then
-    local part = GetClosestPart(inst, hrp.Position)
-    if part then
-        if data.Billboard.Adornee ~= part then data.Billboard.Adornee = part end
-        if data.BillboardText and data.BillboardText.Adornee ~= part then
-            data.BillboardText.Adornee = part
-        end
-        data.Part = part
-
-            -- Расстояние считаем от КАМЕРЫ (нужно только для отображения в тексте)
+    if hrp and data.BillboardText and data.Label then
+        -- Ищем стабильную часть — Head / PrimaryPart
+        local part = inst:FindFirstChild("Head")
+            or inst:FindFirstChild("Head2")
+            or inst:FindFirstChild("HumanoidRootPart")
+            or inst.PrimaryPart
+            or data.Part
+        
+        if part then
+            if data.BillboardText.Adornee ~= part then
+                data.BillboardText.Adornee = part
+            end
+            data.Part = part
+            
+            -- Дистанция от камеры
             local cam = workspace.CurrentCamera
             local camPos = cam and cam.CFrame.Position or hrp.Position
             local dist = (camPos - part.Position).Magnitude
 
-            -- Размер ФИКСИРОВАННЫЙ в пикселях — не трогаем вообще
-            -- (BillboardGui.Size уже задан в MakeEntityESP как UDim2.new(0, 100, 0, 100))
-			            -- Размер текста: у LightBulb — фиксированный, у остальных — скейлится с дистанцией
-            if data.BillboardText then
-                local offsetMul = GetFOVOffsetMultiplier()
-                local sizeMul = GetFOVSizeMultiplier()
-                local baseOffsetY = (inst.Name == "LightBulb") and 1.8 or 2.5
-                data.BillboardText.StudsOffset = Vector3.new(0, 0, 0)
-                data.BillboardText.ExtentsOffsetWorldSpace = Vector3.new(0, baseOffsetY * offsetMul, 0)
+            -- Компенсация FOV (как в UpdateSimpleESP)
+            local sizeMul = GetFOVSizeMultiplier()
+            local offsetMul = GetFOVOffsetMultiplier()
+            local baseOffsetY = 2.5
+            
+            data.BillboardText.ExtentsOffsetWorldSpace = Vector3.new(0, baseOffsetY * offsetMul, 0)
 
-                if inst.Name == "LightBulb" then
-                    data.BillboardText.Size = UDim2.new(8 * sizeMul, 0, 2 * sizeMul, 0)
-                else
-                    local textStuds = 5 + dist * 0.05
-                    if textStuds < 5 then textStuds = 5 end
-                    if textStuds > 25 then textStuds = 25 end
-                    data.BillboardText.Size = UDim2.new(textStuds * sizeMul, 0, textStuds * 0.25 * sizeMul, 0)
-                end
-            end
+            -- Размер с компенсацией FOV
+            local textStuds = 5 + dist * 0.05
+            if textStuds < 5 then textStuds = 5 end
+            if textStuds > 25 then textStuds = 25 end
+            data.BillboardText.Size = UDim2.new(textStuds * sizeMul, 0, textStuds * 0.25 * sizeMul, 0)
+
+            data.Label.Text = labelText .. " [" .. math.floor(dist) .. "]"
         end
     end
- end
+	end
 
 local function RemoveSimpleESP(state, inst)
     local data = state.Objects[inst]
@@ -4443,13 +4650,16 @@ local function IsDoorPart(inst)
         return false
     end
 
-    -- Вспомогалка: содержит ли Main (настоящая дверь) на 2 уровня вглубь?
+    -- Вспомогалка: содержит ли Main или GateDoor (настоящая дверь)
     local function HasMain(obj)
         -- Прямой Main
         if obj:FindFirstChild("Main") then return true end
-        -- Main внутри детей (например, Gate)
+        -- Прямой GateDoor (двери секторов)
+        if obj:FindFirstChild("GateDoor") then return true end
+        -- Main/GateDoor внутри детей (например, Gate)
         for _, child in ipairs(obj:GetChildren()) do
             if child:FindFirstChild("Main") then return true end
+            if child:FindFirstChild("GateDoor") then return true end
         end
         return false
     end
@@ -4619,8 +4829,23 @@ local function AddDoorESP(doorsFolder, color, cachedInfo)
             table.insert(highlights, hl)
             return
         end
-
-        -- Если "Main" не найден — не светим (это декор)
+        
+        -- Fallback: GateDoor (двери секторов)
+        local gateDoor = target:FindFirstChild("GateDoor", true)
+        if gateDoor and gateDoor:IsA("BasePart") then
+            local hl = Instance.new("Highlight")
+            hl.Adornee = gateDoor
+            hl.FillColor = color
+            hl.FillTransparency = 0.85
+            hl.OutlineColor = color
+            hl.OutlineTransparency = 0
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Parent = ESPFolder
+            table.insert(highlights, hl)
+            return
+        end
+        
+        -- Ничего не найдено — не светим
         return
     end
 	
@@ -5741,7 +5966,22 @@ end)
 -- ============================================================
 -- ITEM ESP
 -- ============================================================
-local ItemESPState = { Objects = {}, Cache = {}, Loop = nil, AddedConn = nil, RoomAddedConn = nil, DropAddedConn = nil }
+local ItemESPState = { Objects = {}, Cache = {}, Loop = nil, AddedConn = nil, RoomAddedConn = nil, DropAddedConn = nil, RescanConn = nil, }
+
+-- Список предметов для отслеживания (можно пополнять)
+local ItemWhitelist = {
+    "Vitamins",
+    "Bandage",
+    "Flashlight",
+    "Battery",
+    "Keycard",
+    "Lighter",
+    "Shears",
+    -- добавляй новые сюда
+	"StellaKeycard",
+    "BulkLight",
+	"BreakableCrate",
+}
 
 local ItemESPToggle = VisualsLeft:AddToggle("ItemESPToggle", {
     Text = "Item ESP",
@@ -5756,34 +5996,34 @@ if ItemESPToggle then
     })
 end
 
--- Список предметов для отслеживания (можно пополнять)
-local ItemWhitelist = {
-    "Vitamins",
-    "Bandage",
-    "Flashlight",
-    "Battery",
-    "Lockpick",
-    "Key",
-    "Keycard",
-    "Lighter",
-    "Candle",
-    "Crucifix",
-    "SkeletonKey",
-    "Multitool",
-    "Shears",
-    "StarVial",
-    "StarBottle",
-    "ShieldMini",
-    "ShieldBig",
-    "BandagePack",
-    "BatteryPack",
-    "HolyGrenade",
-    "RiftCandle",
-    "Compass",
-    -- добавляй новые сюда
-	"StellaKeycard",
-    "BulkLight",
-}
+local ItemESPList = VisualsLeft:AddDropdown("ItemESPList", {
+    Text = "Item List",
+    Values = ItemWhitelist,
+    Multi = true,
+    AllowNull = true,
+    Default = ItemWhitelist,
+})
+
+-- При смене списка — очищаем кэш и пересобираем
+if ItemESPList then
+    ItemESPList:OnChanged(function()
+        if ItemESPToggle and ItemESPToggle.Value then
+            -- Убираем все существующие ESP
+            for inst in pairs(ItemESPState.Objects) do
+                RemoveSimpleESP(ItemESPState, inst)
+            end
+            -- Очищаем кэш
+            table.clear(ItemESPState.Objects)
+            table.clear(ItemESPState.Cache)
+            -- Пересобираем
+            RebuildItemCache()
+        end
+    end)
+end
+
+
+
+
 
 -- Быстрая проверка по таблице (O(1))
 local ItemWhitelistMap = {}
@@ -5791,15 +6031,50 @@ for _, name in ipairs(ItemWhitelist) do
     ItemWhitelistMap[name] = name
 end
 
--- Проверка: это интересный предмет?
 local function IsTrackedItem(inst)
     if not inst then return false end
     if not inst:IsA("Model") then return false end
 
-    -- Только по имени из whitelist
-    if not ItemWhitelistMap[inst.Name] then return false end
+    -- ═══════════════════════════════════════════════════════
+    -- 1. Проверка на whitelist (точное или по префиксу)
+    -- ═══════════════════════════════════════════════════════
+    local baseName = inst.Name
+    local matched = ItemWhitelistMap[inst.Name] ~= nil
+    if not matched then
+        local prefix = inst.Name:match("^([^_]+)")
+        if prefix and ItemWhitelistMap[prefix] then
+            baseName = prefix
+            matched = true
+        end
+    end
+    if not matched then return false end
 
-    -- Исключаем предметы в руках / в инвентаре игрока
+    -- ═══════════════════════════════════════════════════════
+    -- 2. Проверка на dropdown (выбран ли в списке)
+    -- ═══════════════════════════════════════════════════════
+    local opt = Library and Library.Options and Library.Options.ItemESPList
+    if opt then
+        local list = opt.Value
+        if typeof(list) == "table" then
+            local inList = false
+            -- Obsidian может хранить как словарь {["Vitamins"]=true} или массив {"Vitamins"}
+            if list[baseName] then
+                inList = true
+            else
+                for _, n in ipairs(list) do
+                    if n == baseName then
+                        inList = true
+                        break
+                    end
+                end
+            end
+            if not inList then return false end
+        end
+    end
+
+    -- ═══════════════════════════════════════════════════════
+    -- 3. Исключаем предметы в руках / в инвентаре игрока
+    -- ═══════════════════════════════════════════════════════
     local char = LocalPlayer.Character
     if char then
         local p = inst
@@ -5811,9 +6086,30 @@ local function IsTrackedItem(inst)
         end
     end
 
-    -- Должен иметь Handle (это подбираемый предмет, а не декор)
+    -- ═══════════════════════════════════════════════════════
+    -- 4. Должен иметь Handle / BasePart
+    -- ═══════════════════════════════════════════════════════
     if not inst:FindFirstChild("Handle") and not inst:FindFirstChildWhichIsA("BasePart") then
         return false
+    end
+
+    -- ═══════════════════════════════════════════════════════
+    -- 5. Специальная проверка для BreakableCrate (сломана?)
+    -- ═══════════════════════════════════════════════════════
+    if string.find(baseName, "BreakableCrate", 1, true) then
+        local lid = inst:FindFirstChild("Lid")
+        local crackedLid = inst:FindFirstChild("CrackedLid")
+        
+        -- Если Lid невидим И CrackedLid видим — сломана
+        if lid and lid:IsA("BasePart") and lid.Transparency >= 1 then
+            return false
+        end
+        if crackedLid and crackedLid:IsA("BasePart") and crackedLid.Transparency < 1 then
+            -- CrackedLid видим — значит сломана
+            if lid and lid.Transparency >= 1 then
+                return false
+            end
+        end
     end
 
     return true
@@ -5854,6 +6150,18 @@ local function StartItemLoop()
     if ItemESPState.Loop then return end
 
     RebuildItemCache()
+	
+	    -- Периодический рескан (для динамически появляющихся коробок/предметов)
+    if ItemESPState.RescanConn then
+        task.cancel(ItemESPState.RescanConn)
+    end
+    ItemESPState.RescanConn = task.spawn(function()
+        while ItemESPState.Loop do
+            task.wait(2)
+            if not ItemESPToggle or not ItemESPToggle.Value then continue end
+            RebuildItemCache()
+        end
+    end)
 
     -- Следим за новыми в Drops
     local drops = workspace:FindFirstChild("Drops")
@@ -5900,10 +6208,15 @@ local function StartItemLoop()
         local color = (Library and Library.Options and Library.Options.ItemESPColor and Library.Options.ItemESPColor.Value) or Color3.fromRGB(0, 255, 100)
         local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 
-        -- Чистим мёртвые
+        -- Чистим мёртвые И сломанные
         local dead = {}
         for inst in pairs(ItemESPState.Cache) do
-            if not inst.Parent then table.insert(dead, inst) end
+            if not inst.Parent then 
+                table.insert(dead, inst) 
+            elseif not IsTrackedItem(inst) then
+                -- Предмет больше не подходит (сломан, подобран, etc.)
+                table.insert(dead, inst)
+            end
         end
         for _, inst in ipairs(dead) do
             RemoveSimpleESP(ItemESPState, inst)
@@ -5968,7 +6281,16 @@ end)
 -- ============================================================
 -- ENTITY ESP + NOTIFY
 -- ============================================================
-local EntityESPState = { Objects = {}, Cache = {}, LastCache = 0, Loop = nil, RescanConn = nil, RoomAddedConn = nil, NotifiedRooms = {} }
+local EntityESPState = { 
+    Objects = {}, 
+    Cache = {}, 
+    LastCache = 0, 
+    Loop = nil, 
+    RescanConn = nil, 
+    RoomAddedConn = nil, 
+    NotifiedRooms = {},
+    AISetupConns = {},   -- ← НОВОЕ
+}
 getgenv().EntityESPState = EntityESPState
 local EntityNames = {}
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -5979,6 +6301,7 @@ EntityNames["LightBulb"] = true
 EntityNames["Glare"] = true
 EntityNames["Route"] = true
 EntityNames["Cue"] = true
+EntityNames["EX15s"] = true
 
 local EntityListArray = {}
 for name in pairs(EntityNames) do
@@ -6068,12 +6391,13 @@ end)
 -- ФИЛЬТРЫ
 -- ============================================================
 local function IsEntity(inst)
-    if not inst or not inst:IsA("Model") then return false end
+    if not inst then return false end
+    if not inst:IsA("Model") then return false end
+    
     for _, pl in ipairs(game:GetService("Players"):GetPlayers()) do
         if pl.Character == inst then return false end
     end
-    -- Обычная лампа — не сущность
-    -- Обычная лампа — не сущность. Заряженная (Shocker = true или ShockPart) — сущность
+    
     if inst.Name == "LightBulb" then
         -- Если есть GlassShards — лампа разбилась
         if inst:FindFirstChild("GlassShards") then return false end
@@ -6085,11 +6409,43 @@ local function IsEntity(inst)
         if ok and val == true then return true end
         return inst:FindFirstChild("ShockPart") ~= nil
     end
-    -- Glare — особый случай: она в Workspace.Entities, активируется через атрибут
+    
     if inst.Name == "Glare" then
         return inst:GetAttribute("glare_active") == true
     end
-    return EntityNames[inst.Name] == true
+    
+    -- Точное совпадение
+    if EntityNames[inst.Name] then return true end
+    
+    -- Проверка по префиксу до "_"
+    local baseName = inst.Name:match("^([^_]+)")
+    if baseName and EntityNames[baseName] then return true end
+    
+    -- Проверка: убираем s в конце (EX15s → EX15)
+    if baseName and baseName:sub(-1) == "s" then
+        local withoutS = baseName:sub(1, -2)
+        if EntityNames[withoutS] then return true end
+    end
+    
+    -- Проверка: добавляем s (EX15 → EX15s)
+    if baseName then
+        if EntityNames[baseName .. "s"] then return true end
+    end
+    
+    -- Проверка: ищем в EntityNames любой ключ, который является префиксом
+    -- НО — только если следующий символ — "_" или цифра (не буква)
+    for key, _ in pairs(EntityNames) do
+        if string.find(inst.Name, key, 1, true) == 1 then
+            local nextChar = inst.Name:sub(#key + 1, #key + 1)
+            -- Пропускаем если nextChar пуст (точное совпадение уже проверено выше)
+            -- Или если это "_", или цифра
+        if nextChar == "" or nextChar == "_" or (nextChar and nextChar:match("%d")) then
+                return true
+            end
+        end
+    end
+    
+    return false
 end
 
 local function ShouldShow(name)
@@ -6097,10 +6453,48 @@ local function ShouldShow(name)
     if not opt then return false end
     local list = opt.Value
     if typeof(list) ~= "table" or not next(list) then return false end
-    if list[name] then return true end
-    for _, n in ipairs(list) do
-        if n == name then return true end
+    
+    -- Функция проверки для одного имени
+    local function checkOne(n)
+        if list[n] then return true end
+        for _, item in ipairs(list) do
+            if item == n then return true end
+        end
+        return false
     end
+    
+    -- Точное совпадение
+    if checkOne(name) then return true end
+    
+    -- Префикс до "_"
+    local baseName = name:match("^([^_]+)")
+    if baseName then
+        if checkOne(baseName) then return true end
+        
+        -- Без s в конце
+        if baseName:sub(-1) == "s" then
+            local withoutS = baseName:sub(1, -2)
+            if checkOne(withoutS) then return true end
+        end
+        
+        -- С s в конце
+        if checkOne(baseName .. "s") then return true end
+    end
+    
+    -- Любой ключ из list, который является префиксом
+    for _, item in ipairs(list) do
+        if string.find(name, item, 1, true) == 1 then
+            return true
+        end
+    end
+    if typeof(list) == "table" then
+        for key, _ in pairs(list) do
+            if typeof(key) == "string" and string.find(name, key, 1, true) == 1 then
+                return true
+            end
+        end
+    end
+    
     return false
 end
 getgenv().MyHub_ShouldShow = ShouldShow
@@ -6243,6 +6637,50 @@ local function StartEntityLoop()
     if EntityESPState.Loop then return end
 
     RebuildEntityCache()
+	-- ═══════════════════════════════════════════════════════
+    -- СЛЕДИМ ЗА AI_Setup (для динамического появления сущностей)
+    -- ═══════════════════════════════════════════════════════
+    if EntityESPState.AISetupConns then
+        for _, conn in ipairs(EntityESPState.AISetupConns) do
+            pcall(function() conn:Disconnect() end)
+        end
+    end
+    EntityESPState.AISetupConns = {}
+    
+    local function WatchAISetup(room)
+        if not room then return end
+        local aiSetup = room:FindFirstChild("AI_Setup")
+        if not aiSetup then return end
+        
+        local conn = aiSetup.DescendantAdded:Connect(function(inst)
+            if not EntityESPToggle or not EntityESPToggle.Value then return end
+            if not inst:IsA("Model") then return end
+            if IsEntity(inst) and ShouldShow(inst.Name) then
+                EntityESPState.Cache[inst] = true
+                print("[Entity ESP] Динамически добавлено:", inst.Name)
+            end
+        end)
+        table.insert(EntityESPState.AISetupConns, conn)
+    end
+    
+    -- Слушаем все комнаты
+    local rooms = workspace:FindFirstChild("CurrentRooms")
+    if rooms then
+        for _, room in ipairs(rooms:GetChildren()) do
+            if tonumber(room.Name) then
+                WatchAISetup(room)
+            end
+        end
+        
+        -- Слушаем новые комнаты
+        table.insert(EntityESPState.AISetupConns, rooms.ChildAdded:Connect(function(room)
+            task.wait(0.5)
+            if EntityESPToggle and EntityESPToggle.Value then
+                WatchAISetup(room)
+            end
+        end))
+    end
+    -- ═══════════════════════════════════════════════════════
 
     -- Следим за новыми сущностями (БЕЗ notify — он теперь в RebuildEntityCache)
     if EntityESPState.AddedConn then EntityESPState.AddedConn:Disconnect() end
@@ -6250,10 +6688,12 @@ local function StartEntityLoop()
     local EntityAddedScheduled = false
     EntityESPState.AddedConn = workspace.DescendantAdded:Connect(function(inst)
         if not EntityESPToggle or not EntityESPToggle.Value then return end
-        local n = inst.Name
-        if n ~= "LightBulb" and n ~= "Route" and n ~= "Cue"
-           and n ~= "Glare" and n ~= "Shade" then return end
         if not inst:IsA("Model") then return end
+        local n = inst.Name
+        -- Пропускаем только известные типы ИЛИ EX15*
+        if n ~= "LightBulb" and n ~= "Route" and n ~= "Cue"
+           and n ~= "Glare" and n ~= "Shade"
+           and not string.find(n, "EX15", 1, true) then return end
         table.insert(EntityAddedQueue, inst)
         if EntityAddedScheduled then return end
         EntityAddedScheduled = true
@@ -6393,6 +6833,25 @@ local function StartEntityLoop()
                     end
                 end
             end
+            
+            -- ═══════════════════════════════════════════════════════
+            -- Рескан AI_Setup во ВСЕХ загруженных комнатах (для EX15 и др.)
+            -- ПОСЛЕ цикла по rn — выполняется ОДИН раз
+            -- ═══════════════════════════════════════════════════════
+            for _, room in ipairs(rooms:GetChildren()) do
+                if tonumber(room.Name) then
+                    local aiSetup = room:FindFirstChild("AI_Setup")
+                    if aiSetup then
+                        for _, inst in ipairs(aiSetup:GetDescendants()) do
+                            if inst:IsA("Model") and not EntityESPState.Cache[inst] then
+                                if IsEntity(inst) and ShouldShow(inst.Name) then
+                                    EntityESPState.Cache[inst] = true
+                                end
+                            end
+                        end
+                    end
+                end
+            end
         end
     end)
 end
@@ -6483,6 +6942,12 @@ local function StopEntityLoop()
     if EntityESPState.RoomConn then
         EntityESPState.RoomConn:Disconnect()
         EntityESPState.RoomConn = nil
+    end
+	    if EntityESPState.AISetupConns then
+        for _, conn in ipairs(EntityESPState.AISetupConns) do
+            pcall(function() conn:Disconnect() end)
+        end
+        EntityESPState.AISetupConns = {}
     end
 end
 
