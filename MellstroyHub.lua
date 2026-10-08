@@ -1250,7 +1250,7 @@ end, function()
 end, PositionSpoofToggle, Library and Library.Options and Library.Options.PositionSpoofKeybind)
 
 -- ═══════════════════════════════════════════════
-local POS_OFFSET_UP = 40            -- подняли с 20 → 40
+local POS_OFFSET_UP = 60            -- подняли с 20 → 40
 local POS_CEILING_RADIUS = 300
 local POS_RETRY_LIMIT = 5
 local POS_RETRY_DELAY = 0.05
@@ -3614,6 +3614,68 @@ RegisterCleanup("BypassA90", function()
     end
 end)
 end
+
+
+-- ═══════════════════════════════════════════════════════
+-- BYPASS GHOUL (постоянный спуф приседа)
+-- ═══════════════════════════════════════════════════════
+local BypassGhoulToggle = ExploitsRight:AddToggle("BypassGhoulToggle", {
+    Text = "Bypass Ghoul",
+    Default = false,
+    Tooltip = "Постоянно сообщает серверу, что ты присел. Обходит Ghoul."
+})
+
+local BypassGhoulState = {
+    Enabled = false,
+    Conn = nil,
+}
+
+local function BypassGhoul_Enable()
+    if BypassGhoulState.Enabled then return end
+    BypassGhoulState.Enabled = true
+
+    BypassGhoulState.Conn = RunService.Heartbeat:Connect(function()
+        if not BypassGhoulState.Enabled then return end
+        
+        local RS = game:GetService("ReplicatedStorage")
+        local assets = RS:FindFirstChild("Assets")
+        local events = assets and assets:FindFirstChild("Events")
+        local update = events and events:FindFirstChild("UpdateCrouchingStatus")
+        
+        if update then
+            pcall(function()
+                update:FireServer(true)
+            end)
+        end
+    end)
+
+    print("[BypassGhoul] === ON ===")
+end
+
+local function BypassGhoul_Disable()
+    if not BypassGhoulState.Enabled then return end
+    BypassGhoulState.Enabled = false
+
+    if BypassGhoulState.Conn then
+        BypassGhoulState.Conn:Disconnect()
+        BypassGhoulState.Conn = nil
+    end
+
+    print("[BypassGhoul] === OFF ===")
+end
+
+if BypassGhoulToggle then
+    BypassGhoulToggle:OnChanged(function(Value)
+        if Value then BypassGhoul_Enable() else BypassGhoul_Disable() end
+    end)
+end
+
+RegisterCleanup("BypassGhoul", function()
+    pcall(BypassGhoul_Disable)
+    if Toggles and Toggles.BypassGhoulToggle then
+        SafeSetValue(Toggles.BypassGhoulToggle, false)
+    end
+end)
 end
 
 
@@ -3855,7 +3917,8 @@ local function UpdateSimpleESP(data, inst, textColor, outlineColor, labelText, h
 	-- Отображаемые имена (переопределение)
     local DisplayNames = {
         ["BreakableCrate"] = "Crate",
-		["StellaKeycard"] = "Stella Card",
+        ["StellaKeycard"] = "Stella Card",
+        ["KeycardLevel2"] = "CodeBreacher",   -- ← НОВОЕ
     }
     local displayText = DisplayNames[labelText] or labelText
     local colorOpt = nil
@@ -4042,6 +4105,13 @@ end
 
 local function UpdateEntityESP(data, inst, textColor, outlineColor, labelText, hrp)
     if not data then return end
+	
+	    -- Отображаемые имена
+    local EntityDisplayNames = {
+        ["UnknownEntity"] = "Unknown Entity",
+        ["EX15s"] = "EX15",
+    }
+    labelText = EntityDisplayNames[labelText] or labelText
 
     -- Highlight цвет (только если есть)
     if data.Highlight then
@@ -4650,16 +4720,24 @@ local function IsDoorPart(inst)
         return false
     end
 
-    -- Вспомогалка: содержит ли Main или GateDoor (настоящая дверь)
+    -- Вспомогалка: содержит ли Main, GateDoor, или LeftDoor/RightDoor (любая настоящая дверь)
     local function HasMain(obj)
-        -- Прямой Main
+        -- Прямой Main / GateDoor
         if obj:FindFirstChild("Main") then return true end
-        -- Прямой GateDoor (двери секторов)
         if obj:FindFirstChild("GateDoor") then return true end
-        -- Main/GateDoor внутри детей (например, Gate)
+        
+        -- Створки (для новых двойных дверей)
+        if obj:FindFirstChild("LeftDoor") then return true end
+        if obj:FindFirstChild("RightDoor") then return true end
+        if obj:FindFirstChild("LowerLeftDoor") then return true end
+        if obj:FindFirstChild("LowerRightDoor") then return true end
+        
+        -- Внутри детей (например, Gate)
         for _, child in ipairs(obj:GetChildren()) do
             if child:FindFirstChild("Main") then return true end
             if child:FindFirstChild("GateDoor") then return true end
+            if child:FindFirstChild("LeftDoor") then return true end
+            if child:FindFirstChild("RightDoor") then return true end
         end
         return false
     end
@@ -4744,6 +4822,14 @@ local function ComputeDoorCenter(doorsFolder)
             if leftPart then return leftPart.Position end
             if rightPart then return rightPart.Position end
         end
+		    -- Формат C: LeftDoor / RightDoor напрямую
+            local leftDoor = doorsFolder:FindFirstChild("LeftDoor")
+            local rightDoor = doorsFolder:FindFirstChild("RightDoor")
+            if leftDoor and rightDoor then
+                return (leftDoor.Position + rightDoor.Position) / 2
+            end
+            if leftDoor then return leftDoor.Position end
+            if rightDoor then return rightDoor.Position end
         if doorsFolder.PrimaryPart then return doorsFolder.PrimaryPart.Position end
     end
         -- Общий случай — bbox модели
@@ -4882,7 +4968,7 @@ local function AddDoorESP(doorsFolder, color, cachedInfo)
         -- Формат A: Door → Gate → Main (Warehouse)
         local gate = doorsFolder:FindFirstChild("Gate")
         if gate then
-            addHL(gate)   -- addHL сам найдёт Main внутри
+            addHL(gate)
         else
             -- Формат B: Door → Doors → DoorLeft / DoorRight
             local doorsSub = doorsFolder:FindFirstChild("Doors")
@@ -4893,6 +4979,17 @@ local function AddDoorESP(doorsFolder, color, cachedInfo)
                         if mesh then addHL(mesh) end
                     end
                 end
+            -- ⬇️ НОВЫЙ ФОРМАТ C: Door → LeftDoor / RightDoor (прямо внутри)
+            elseif doorsFolder:FindFirstChild("LeftDoor") or doorsFolder:FindFirstChild("RightDoor") then
+                local left = doorsFolder:FindFirstChild("LeftDoor")
+                local right = doorsFolder:FindFirstChild("RightDoor")
+                local lowerLeft = doorsFolder:FindFirstChild("LowerLeftDoor")
+                local lowerRight = doorsFolder:FindFirstChild("LowerRightDoor")
+                
+                if left then addHL(left) end
+                if right then addHL(right) end
+                if lowerLeft then addHL(lowerLeft) end
+                if lowerRight then addHL(lowerRight) end
             else
                 -- Fallback
                 local target = doorsFolder:FindFirstChild("PrimaryPart")
@@ -5316,6 +5413,31 @@ local function IsKeycard(inst)
     if not inst or typeof(inst) ~= "Instance" then return false end
     if not (inst:IsA("Model") or inst:IsA("BasePart") or inst:IsA("Tool")) then return false end
     if not string.find(string.lower(inst.Name), "keycard", 1, true) then return false end
+	-- ═══════════════════════════════════════════════════════
+    -- Исключаем LOOTLOCKER'ы (даже если в имени есть "Keycard")
+    -- ═══════════════════════════════════════════════════════
+    local nameLower = string.lower(inst.Name)
+    if string.find(nameLower, "lootlocker", 1, true) 
+       or string.find(nameLower, "locker", 1, true)
+       or string.find(nameLower, "wardrobe", 1, true) then
+        return false
+    end
+    
+    -- Исключаем по родителям
+    local p = inst.Parent
+    local depth = 0
+    while p and p ~= workspace and depth < 8 do
+        local n = string.lower(p.Name or "")
+        if n == "hidinglocker" or n == "hidelocker" or n == "hidinglockers"
+           or n == "wardrobe" or n == "locker" or n == "lockers"
+           or n == "closet" or n == "lootlocker" then
+            return false
+        end
+        p = p.Parent
+        depth = depth + 1
+    end
+	-- Исключаем KeycardLevel2 (это Item ESP предмет)
+    if string.find(string.lower(inst.Name), "level", 1, true) then return false end
 	
 	    -- Исключаем StellaKeycard (это предмет/декор, а не обычная кейкарта)
     if string.find(string.lower(inst.Name), "stella", 1, true) then return false end
@@ -5981,6 +6103,7 @@ local ItemWhitelist = {
 	"StellaKeycard",
     "BulkLight",
 	"BreakableCrate",
+	"KeycardLevel2",
 }
 
 local ItemESPToggle = VisualsLeft:AddToggle("ItemESPToggle", {
@@ -5996,12 +6119,22 @@ if ItemESPToggle then
     })
 end
 
+-- Список для отображения (с переименованиями)
+local ItemDisplayList = {}
+for _, name in ipairs(ItemWhitelist) do
+    if name == "KeycardLevel2" then
+        table.insert(ItemDisplayList, "CodeBreacher")
+    else
+        table.insert(ItemDisplayList, name)
+    end
+end
+
 local ItemESPList = VisualsLeft:AddDropdown("ItemESPList", {
     Text = "Item List",
-    Values = ItemWhitelist,
+    Values = ItemDisplayList,   -- отображаемые имена
     Multi = true,
     AllowNull = true,
-    Default = ItemWhitelist,
+    Default = ItemDisplayList,
 })
 
 -- При смене списка — очищаем кэш и пересобираем
@@ -6048,6 +6181,23 @@ local function IsTrackedItem(inst)
         end
     end
     if not matched then return false end
+	
+	
+	-- ═══════════════════════════════════════════════════════
+    -- Исключаем объекты из Cutscene (кат-сцены)
+    -- ═══════════════════════════════════════════════════════
+	do
+    local p = inst.Parent
+    local depth = 0
+    while p and p ~= workspace and depth < 8 do
+        local n = string.lower(p.Name or "")
+        if n == "cutscene" or n == "cutscenes" then
+            return false
+        end
+        p = p.Parent
+        depth = depth + 1
+    end
+	end
 
     -- ═══════════════════════════════════════════════════════
     -- 2. Проверка на dropdown (выбран ли в списке)
@@ -6056,13 +6206,22 @@ local function IsTrackedItem(inst)
     if opt then
         local list = opt.Value
         if typeof(list) == "table" then
+            -- Маппинг: реальное_имя_инстанса → отображаемое_имя_в_dropdown
+            local DisplayMap = {
+                ["KeycardLevel2"] = "CodeBreacher",
+                ["BreakableCrate"] = "Crate",
+                ["StellaKeycard"] = "Stella Card",
+            }
+            
+            local displayedName = DisplayMap[baseName] or baseName
+            
             local inList = false
-            -- Obsidian может хранить как словарь {["Vitamins"]=true} или массив {"Vitamins"}
-            if list[baseName] then
+            -- Проверяем и реальное имя, и отображаемое
+            if list[baseName] or list[displayedName] then
                 inList = true
             else
                 for _, n in ipairs(list) do
-                    if n == baseName then
+                    if n == baseName or n == displayedName then
                         inList = true
                         break
                     end
@@ -6302,6 +6461,7 @@ EntityNames["Glare"] = true
 EntityNames["Route"] = true
 EntityNames["Cue"] = true
 EntityNames["EX15s"] = true
+EntityNames["UnknownEntity"] = true
 
 local EntityListArray = {}
 for name in pairs(EntityNames) do
